@@ -1,0 +1,164 @@
+# Constructing a logistic regression estimator
+## Dr Thomas Robinson | Day 1 -- Oxford Spring School 2024
+
+## Defining a data and prediction function
+
+In this exercise we will focus on a simple binary classification context, in which we use logistic regression to estimate the coefficient values. First, we will generate training data using random uniform distributions:
+```{r}
+set.seed(89)
+n <- 100
+
+X_data <- data.frame(X0 = 1, # include a constant to model the intercept
+                     X1 = runif(n,-5,5),
+                     X2 = runif(n,-2,2))
+```
+
+Next, for every training observation, let us define the probability of being in the positive class (`1`) using the logistic function to ensure the probability is correctly bounded between 0 and 1:
+
+```{r}
+# note we add random noise so that we don't have a perfectly linear problem
+linear_component <- 3 + 1*X_data$X1 - 2*X_data$X2 + rnorm(n,0,0.05)
+
+Y_p <- 1/(1+exp(-(linear_component)))
+
+Y <- rbinom(n,1,Y_p)
+```
+
+Next, let's define our own prediction function that yields the predicted probability, *given* a set of coefficient:
+
+```{r}
+# Custom function to get logistic yhat predictions
+predict_row <- function(row, coefficients) {
+  pred_terms <- row*coefficients
+  yhat <- sum(pred_terms)
+  return(1/(1+exp(-yhat)))
+}
+```
+
+Now we have the apparatus to start thinking about *learning* the model parameters from the data!
+
+## Naive approach: a random guess!
+
+As a first approach, we could just simply try guess the parameters of our model:
+
+```{r}
+# "random" guess
+coef_guess <- c(0,0.5,1)
+yhat_guess <- apply(X_data, 1, predict_row, coefficients = coef_guess)
+```
+
+How good is our guess? 
+
+We can calculate the (negative) log-likelihood of our estimates, but as you'll see the values themselves are quite hard to interpret at face value. So we can also define the *mean squared error* as a simpler metric, which has a theoretical minimum of 0:
+
+```{r}
+MSE <- function(ytrue, yhat) {
+  return(mean((ytrue-yhat)^2))
+}
+
+NLL <- function(ytrue, yhat) {
+  return(-sum(log(
+    (yhat^ytrue)*((1-yhat)^(1-ytrue))
+  )))
+}
+
+```
+
+Now, we can calculate the error summaries from our random guess of the parameters:
+```{r}
+nll_guess <- NLL(Y, yhat_guess)
+print(paste0("Neg. Log. Likelihood: ", nll_guess))
+
+mse_guess <- MSE(Y, yhat_guess)
+print(paste0("Mean Squared Error: ", mse_guess))
+```
+
+Let's compare these to a theoretical model where we were to guess the coefficients *exactly*:
+
+```{r}
+coef_true <- c(3,1,-2)
+yhat_true <- apply(X_data, 1, predict_row, coefficients = coef_true)
+nll_true <- NLL(Y, yhat_true)
+mse_true <- MSE(Y, yhat_true)
+
+print(paste0("Neg. Log. Likelihood: ", nll_true))
+print(paste0("Mean Squared Error: ", mse_true))
+```
+
+So, in both cases, the error statistics are *much* smaller, so we can conclude our naive approach is quite bad (phew!)
+
+## A logistic regression training algorithm
+
+Next, let's consider writing a function to implement logistic regression estimation using maximum likelihood estimation. Here we'll implement *stochastic gradient descent* approximation, iterating through each row of the dataset and updating the parameters:
+
+```{r}
+train <- function(X, y, l_rate, reps) {
+  # X = training data
+  # y = true outcomes
+  # l_rate = learning rate
+  # reps = maximum number of repetitions through SGD process
+  
+  # Instantiate model with basic guess of 0 for all coefficients 
+  coefs <- rep(0, ncol(X))
+  
+  for (r in 1:reps) {
+    
+    # create empty vector to store predictions
+    yhat <- rep(NA, length(y))
+    
+    # Iterate through each row of the dataset
+    for (i in 1:nrow(X)) {
+      
+      row_vec <- as.numeric(X[i,]) # make row easier to handle
+      
+      yhat_i <- predict_row(row_vec, coefficients = coefs)
+      yhat[i] <- yhat_i # store to calculate log-likelihood for printing
+      
+      # for each coefficient, apply update using partial derivative
+      coefs <- sapply(1:length(coefs), function (k) {
+        coefs[k] - l_rate*(yhat_i - y[i])*row_vec[k]
+        }
+      )
+      
+    }
+    
+    # calculate error summaries
+    MSE_rep <- MSE(y, yhat)
+    NLL_rep <- NLL(y, yhat)
+    
+    
+    message(
+      paste0(
+        "Iteration ", r ,"/",reps," | NLL = ", round(NLL_rep,5),"; MSE = ", round(MSE_rep,5)
+        )
+      )
+  }
+  
+  return(coefs) # output the final estimates
+}
+```
+
+#### 4. Apply our algorithm ####
+
+Now we have everything to estimate our logistic regression parameters:
+
+```{r}
+coef_logit <- train(X = X_data, y = Y, l_rate = 0.05, reps = 20)
+```
+
+Notice that the decrease in loss over iterations is quite marginal by about 15 steps, suggesting our training is converging. If we now inspect the estimated coefficients themselves, you'll see how close we got:
+
+```{r}
+print(coef_true)
+print(round(coef_logit,3))
+```
+
+Not *too* bad, but not quite perfect. How might we try get closer?
+
+## Exercises
+
+1. What is the intuition behind making the coefficients all equal 0 at the start of training? What happens if we change the function so that the coefficients are randomly assigned (with a mean of 0)? Does this improve convergence? How?
+
+2. Suppose we had unseen data, such that we can't guess how many repetitions it will likely take to converge on a minimum value. Rather than specify a number of repetitions in the function, therefore, try adding a "stopping rule" so that the SGD algorithm repeats until the value converges (to some level of precision, defined by the researcher)
+
+3. *BONUS*: SGD is really effective, but can run into some issues depending on the shape of the loss curve. Consider two such scenarios: 1) the loss curve is very shallow, only changes marginally over our parameter value, and is non-zero, 2) the loss curve is highly convex. First, why might these loss curves prove difficult for SGD? Second, can you find any modifications of (S)GD that might help us resolve this suboptimal performance?
