@@ -2,9 +2,9 @@
 
 ## Oxford Spring School in Advanced Research Methods 2024
 
-This repository contains all the slides for the course.
+This repository contains all the slides for the course. We may update these slides as we go along, so this repo will always store the latest version. 
 
-These slides may get updated during the course, and as we refine the material based on progress etc.
+I have also included all the `code/` required for the workshops, plus complementary readings below.  
 
 ## Readings
 
