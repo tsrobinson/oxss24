@@ -1,0 +1,172 @@
+# LASSO models and post-double selection
+## Dr Thomas Robinson | Day 2 -- Oxford Spring School 2024
+
+This code adapts the replication materials contained in Blackwell and Olson (2022), ``Reducing Model Misspecification and Bias in the Estimation of Interactions'', available at: https://doi.org/10.7910/DVN/HZYFRI
+
+In turn, this paper replicates original findings presented in: Escribà‐Folch, A., Meseguer, C. and Wright, J. (2018), Remittances and Protest in Dictatorships. American Journal of Political Science, 62: 889-904. https://doi.org/10.1111/ajps.12382
+
+NOTE: For the purpose of demonstration, we'll make several simplifying assumptions about both the post-double selection procedure and the inference model -- you can review the two papers to compare how our strategy differs
+
+## Package requirements and data pre-processing
+
+```{r}
+# install.packages("haven")
+# install.packages("lfe")
+# install.packages("glmnet")
+
+library(haven)
+library(lfe)
+library(glmnet)
+```
+
+First, let's read in the data. You can download this file from the replication materials linked above. We also need to create two variables from the raw data, to complete the analysis:
+
+```{r}
+emw <- read_dta("../data/efmw_replication.dta")
+
+# Create variables included in original paper
+emw$dist <- log(1 + (1 / (emw$dist_coast)))
+emw$distwremit <- log(1 + ( (emw$richremit / 1000000) * (emw$dist)))
+```
+
+Finally, let's limit the data to the relevant columns and remove any cases with missing data (note: this is not a good missing data strategy, as we'll discuss later in the week!) We then generate fixed effects as per the cited papers, and convert the data to a model matrix to make running our analysis in R easier:
+
+```{r}
+
+# subset columns
+emw <- emw[, c("Protest", "remit", "dict", "l1gdp", "l1pop", "l1nbr5", "l12gr",
+               "l1migr", "elec3", "cowcode", "period", "distwremit",
+               "caseid", "year")]
+
+# remove rows with missing values
+emw <- na.omit(emw)
+
+controls <- c("l1gdp", "l1pop", "l1nbr5", "l12gr", "l1migr", "elec3")
+
+# Generate fixed effects (don't worry too much about this)
+contr.list <- list(contr.sum, contr.sum)
+names(contr.list) <- c("factor(period)","factor(cowcode)")
+mod_mat <- model.matrix(~factor(period)+factor(cowcode),data=emw,contrasts.arg=contr.list)[,-1]
+```
+
+Now we are ready to sort our data into the various variables described in the method:
+
+```{r}
+# First, create a matrix of control variables
+X <- as.matrix(cbind(emw[,controls],mod_mat))
+
+# Next, extract the moderator of interest
+V <- emw$dict
+
+# Create a version of the controls matrix where each column is interacted with V
+VX <- as.matrix(V*X)
+
+# Extract the treatment variable
+D <- emw$remit
+
+# Interact treatment with the moderator
+DV <- D*V
+
+# Extract the outcome
+Y <- emw$Protest
+```
+
+
+## Stage 1. Estimate LASSO models
+
+Our goal is to use LASSO to select non-zero (i.e. important) variables to include in our final analysis. To do so, we first define a function to run a LASSO model and return the (position of) non-zero coefficients:
+
+```{r}
+lasso_selector <- function(LHS, RHS) {
+  
+  # Estimate the LASSO model
+  # NOTE: we are going to assume a lambda value here
+  # We will discuss how to choose this value in a principled way tomorrow
+  lasso <- glmnet(x=RHS, y=LHS, alpha=1, lambda = 0.002)
+  
+  # Find non-zero coefficients by their index position
+  coef_index <- which(coef(lasso) != 0) - 1 
+  
+  return(coef_index)
+  
+}
+```
+
+Now, we can define the RHS matrix and then fit separate LASSO models for the outcome, treatment and moderated treatment vectors:
+
+```{r}
+
+## Define RHS matrix
+RHS_matrix <- as.matrix(cbind(V = V,X,VX))
+
+# Optional but useful to keep track of names
+colnames(RHS_matrix) <- c("V", colnames(X), 
+                          paste0("V_",colnames(X)))
+
+Y_lasso <-  lasso_selector(LHS = Y, RHS = RHS_matrix)
+D_lasso <-  lasso_selector(LHS = D, RHS = RHS_matrix)
+DV_lasso <- lasso_selector(LHS = DV, RHS = RHS_matrix)
+
+# we don't want to select the same column more than once, so use unique()
+selected_columns <- unique(c(Y_lasso, D_lasso, DV_lasso))
+```
+
+## Stage 2. Estimate inference model
+
+The next stage is to use the selected columns from the LASSO procedure to estimate the final inference model. We start by defining the double-selection matrix of necessary variables, and the LASSO-identified controls:
+
+```{r}
+ds_matrix <- as.data.frame(cbind(Protest=Y,
+                                 remit=D,
+                                 remit_dict=DV,
+                                 RHS_matrix[,selected_columns]))
+```
+
+Now we can compare the double-selection (`ds`) model, against the naive controls-only model:
+
+```{r}
+ds_model <- glm("Protest~.", data = ds_matrix)
+
+naive_model <- glm(paste0(c("Protest ~ remit*dict",
+                            controls,
+                            "as.factor(period) + as.factor(cowcode)"), 
+                          collapse = " + "),
+                   data = cbind(emw, remit_dict = DV))
+```
+
+Now we define a convenience function to remove fixed effects from the output, and compare the results:
+
+```{r}
+message("Naive model:")
+summary(naive_model)$coefficients[c("remit","remit:dict"),]
+message("DS model:")
+summary(ds_model)$coefficients[c("remit","remit_dict"),]
+```
+
+## Exercises
+
+1a. Generate a training dataset X with 100 variables and 2000 observations, where each observation is a draw from a random uniform distribution between -5 and 5.
+
+1b. Generate an outcome vector Y that has the following features
+   i.     Linear in relation to all 100 variables
+   ii.    As X1 increases by 1, Y increases by 10
+   iii.   As X2 increases by 1, Y decreases by 5
+   iv.    X3-X10 do not affect Y
+   v.     X11-X100 have coefficients drawn from a random normal distribution with mean = 0, sd = 0.05
+
+1c. Estimate a LASSO model on this data
+
+*What are the sizes of coefficient X1 X2? Do X3-X10 have non-zero coefficients? What about X11-X100? How would you explain these results to a non-ML researcher?*
+
+
+2. Blackwell and Olson propose a slightly more complicated regularization procedure in their post-double selection method, whereby they use separate regularisation for each coefficient.
+
+Further information can be found on pages 14-15 of the article, available here:
+https://mattblackwell.org/files/papers/lasso-inters.pdf
+
+To see this in action, look at the rlasso_cluster function from line 221 in the following file:
+https://github.com/mattblackwell/inters/blob/master/R/lasso_interactions.R
+
+2a. Using the help file for glmnet, i.e. type `?glmnet` into the console, and looking at lines 252-254 in the github file above, what argument is passed to glmnet to penalize individual coefficient values?
+
+2b. Without worrying too much about the surrounding code, describe what lines 250-261 achieve. 
