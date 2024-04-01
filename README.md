@@ -4,7 +4,7 @@
 
 This repository contains all the slides for the course. We may update these slides as we go along, so this repo will always store the latest version. 
 
-I have also included all the `code/` required for the workshops, plus complementary readings below.  
+All the `code/` required for the workshops will be uploaded a day in advance, and all complementary readings are listed below.
 
 ## Readings
 
