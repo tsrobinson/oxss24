@@ -1,0 +1,207 @@
+# Random Forest and BART Predictions
+## Dr Thomas Robinson | Day 3 -- Oxford Spring School 2024
+
+This walkthrough uses the Cooperative ~~Congressional~~ Election Survey 2018 data, which fields a large study every two years on  US voters across all US states + D.C.
+
+The full data and codebook are available at https://doi.org/10.7910/DVN/ZSBZ7K
+
+## Package dependencies
+
+```{r}
+# install.packages("tidyverse")
+# install.packages("haven")
+# install.packages("randomForest")
+# install.packages("BART")
+# install.packages("dplyr")
+
+library(tidyverse)
+library(haven)
+library(randomForest)
+library(BART)
+library(dplyr)
+```
+
+## Clean the raw data
+
+Since the raw data file is so large, we will work with a cleaned subset of the data. The code to perform this data munging is included below for reference. You can simply use the much smaller file uploaded to Moodle.
+
+```{r}
+# !!! NB: This file is 800MB
+# cces <- read_dta("https://dataverse.harvard.edu/api/access/datafile/:persistentId?persistentId=doi:10.7910/DVN/ZSBZ7K/H5IDTA")
+# 
+# cces_format <- cces %>%
+#   select(inputstate, birthyr, gender, sexuality, trans, educ, votereg, race, employ,
+#          internethome, internetwork, marstat, pid3, ideo5, pew_bornagain,
+#          pew_religimp, pew_churatd, pew_prayer, religpew, child18num, newsint, faminc_new,
+#          ownhome, urbancity, immstat, cit1, unionhh, investor, CC18_317) %>%
+#   mutate(child18num = ifelse(is.na(child18num),0,child18num)) %>%
+#   as_factor() %>%
+#   rename(vote2016 = CC18_317) %>%
+#   na.omit() # Note, I'm having to remove lots of missing data!
+# 
+# apply(cces_format, 2, function (x) sum(is.na(x)))
+# nrow(na.omit(cces_format))
+# 
+# write_csv(cces_format, "../data/cces_formatted_oxss.csv")
+```
+
+## Load the data
+
+First, let's read in our cleaned data and make sure that all factor variables are treated as such. One quick way of doing so is to check whether the data is of "character" type, and if so convert it to a factor. Notice that since we are not performing linear regression, we don't really need to worry too about setting reference levels etc.
+
+```{r}
+cces <- read.csv("../data/cces_formatted_oxss.csv")
+
+# Convert predictors to factors
+for (v in 1:ncol(cces)) {
+  
+  if (is.character(cces[[v]])) {
+    
+    cces[[v]] <- as.factor(cces[[v]])
+    
+  }
+  
+}
+```
+
+## How complex is this data?
+
+One major advantage of ML methods is their ability to handle high-dimensional data, where there are many columns, and where the relationships between columns is (assumed to be) complex. Also, note that, with categorical columns, the "effective" number of columns (i.e. post one-hot encoding) is often much larger than the number of *variables* in the model:
+
+```{r}
+# How many columns?
+ncol(cces)
+
+# How about the effective number of columns?
+unique_cols <- apply(cces,2, function (x) ifelse(is.numeric(x),1,length(unique(x))))
+sum(unique_cols)
+```
+
+## A prediction problem
+
+Let's suppose we want to predict whether or not individuals voted for Trump. You should think carefully about the "social scientific" lens of this problem: is this something we would typically want to do in our research? If so, in what contexts? 
+
+Let's next simplify our outcome measure (remembering that potentially many candidates run in the presidential race, even if it is largely a two-party contest):
+
+```{r}
+cces$votetrump <- ifelse(cces$vote2016 == "Donald Trump", "Trump","Other")
+cces$votetrump <- as.factor(cces$votetrump) # ensure it's treated as a factor
+
+# don't forget to drop the old variable!
+cces$vote2016 <- NULL
+```
+
+
+Now we can perform the standard ML task of subdividing our data into test and train sets. Note that, unless we know otherwise, it's highly unlikely that the order of the observations in a dataset is random: the data may be stacked by state, for example. Therefore, it's best to randomly choose the columns to include in our data. Let's keep two-thirds of our data for training the model, and the remainder for our test set. We will also separate out our Ytest values to use to benchmark the out-of-sample performance of our model.
+
+```{r}
+
+# this is the first call to a random function, so set the RNG seed!
+set.seed(89)
+
+# construct train/test datasets
+train_indices <- sample(1:nrow(cces), 0.666*nrow(cces))
+test_indices <-  setdiff(1:nrow(cces), train_indices)
+
+# a little bit of extra formatting
+X_train <- cces[train_indices, ]
+X_test <- cces[test_indices,] %>% select(-votetrump)
+Y_test <- cces$votetrump[test_indices]
+```
+
+Finally, let's inspect what proportion of individuals voted for Trump across our training and test data:
+
+```{r}
+prop.table(table(X_train$votetrump))
+prop.table(table(Y_test))
+```
+
+## Random forest
+
+Training many ML models in R is pretty easy! The `randomForest` package provides a single function where we specify a "regression-like" formula, the data, and any hyperparameters we want to adjust, and it will fit the model (quickly!):
+
+```{r}
+rf_model <- randomForest(votetrump ~ ., data = X_train, 
+                         mtry = 2, ntree = 500,
+                         importance = TRUE)
+```
+
+We can also use some inbuilt interpretation functions to see how important the variables in our model are for predicting vote choice (although beware the caveats about the bias-variance trade-off!):
+ 
+```{r}
+## Inspect the mechanics of the model
+importance(rf_model)
+varImpPlot(rf_model)
+```
+
+Finally, let's assess the out-of-sample performance by predicting the vote choice of our test set, and compare it to the known values (`Y_test`):
+
+```{r}
+# Make predictions on new data
+rf_predictions <- predict(rf_model, X_test, type = "class")
+
+# Get the accuracy of predictions on the test data
+rf_acc <- mean(rf_predictions == Y_test)
+print(paste0("Random Forest accuracy: ", round(rf_acc,3)))
+
+# Help visualise the predictions vs. true Y by creating a data.frame
+rf_comp <- data.frame(y_pred = rf_predictions,
+                      y_true = Y_test)  
+```
+
+## BART models
+
+ML can be very memory-intensive, and while R does its best to manage memory, sometimes it can be a bit slow to clear away any "garbage". So we can force R to do some "garbage collection" by calling the following:
+
+```{r}
+gc() # good to call this now and again, especially in for-loops etc.
+```
+
+## Training the BART model
+
+Like with `randomForest`, a BART model can be called using a single function. `BART`, however, is a bit fussier and requires us to be specific about what type of outcome we want to model. In this case, we have a binary outcome, and so we will use the "probit" BART function, called `pbart`.
+
+Again, notice we can supply hyperparameters like the number of trees (we'll use fewer than for a random forest):
+
+```{r}
+# NB: The BART package requires a numeric outcome variable
+bart_model <- pbart(x.train = X_train[,names(X_train) != "votetrump"],
+                    y.train = ifelse(X_train$votetrump == "Trump",1,0),
+                    ntree = 50L, numcut = 100L)
+```
+
+Now, we can make predictions using BART:
+
+```{r}
+# Predict the out-of-sample outcomes (notice this takes longer!)
+bart_pred_probs <- predict(bart_model, newdata = bartModelMatrix(X_test))
+
+# predict.pbart yields probabilities, so let's round to either 0 or 1
+bart_pred_bin <- round(bart_pred_probs$prob.test.mean)
+
+# And relabel
+bart_predictions <- ifelse(bart_pred_bin == 1, "Trump","Other")
+
+# Then calculate as with RF
+bart_acc <- mean(bart_predictions == Y_test)
+print(paste0("BART accuracy: ", round(bart_acc,3)))
+
+# Compare against actual and RF
+full_comp <- data.frame(y_true = Y_test,
+                        y_rf = rf_predictions,
+                        y_bart = bart_predictions)
+```
+
+## Exercises
+
+1. What effect does increasing the number of trees have on the out-of-sample accuracy of both the random forest and BART models?
+
+2. Make your choice of hyperparameter values more robust by writing a k-fold cross-validation routine for the random forest and/or BART models. 
+
+  * For this task, it would be absolutely fine to do a grid search of one or two hyperparameters, with a small number of different values.
+
+3.Rad the following short article listed on the Moodle page:  
+
+*Bisbee, James (2019) “BARP: Improving Mister P Using Bayesian Additive Regression Trees,” American Political Science Review. Cambridge University Press, 113(4), pp. 1060–1065. doi: 10.1017/S0003055419000480. Available online here: https://cup.org/3gzOt9o *
+
+Why is BART useful for this specific application?

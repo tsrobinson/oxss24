@@ -1,0 +1,155 @@
+# Neural Networks in R
+## Dr Thomas Robinson | Day 4 -- Oxford Spring School 2024
+
+The data used today is called the "Adult Data Set" and is census data from the US. It is typically used in machine learning benchmarking applications.
+
+The original data can be accessed from the UCI Machine Learning Repository:
+https://archive.ics.uci.edu/ml/datasets/adult
+
+## System setup
+
+Neural networks are complex, linear algebra monsters and would be very hard to run (efficiently) using native R. Therefore, most implementations of neural network modelling use R as an interface to another programming language (in our case, Python) where the actual computation is run, before the results are returned to R.
+
+Therefore, we need to complete a little bit more setup prior to building our first neural networks! The best course of action is to follow this guide: https://tensorflow.rstudio.com/install/
+
+To help speed things along, the following setup code *should* work, but you may need to troubleshoot individual errors based on your own computer/OS!
+
+```{r}
+## Set up commands -- follow this to set up on your own machine
+# install.packages("remotes")
+# remotes::install_github("rstudio/tensorflow")
+# install.packages("reticulate")
+# tensorflow::install_tensorflow(envname = "r-reticulate")
+# install.packages("keras")
+# keras::install_keras()
+# install.packages("recipes")
+```
+
+## Loading packages and data
+
+```{r}
+library(tensorflow)
+library(keras)
+library(tidyverse)
+library(recipes)
+
+## Read in the data
+adult <- read_csv("https://raw.githubusercontent.com/MIDASverse/MIDASpy/master/Examples/adult_data.csv") %>% 
+  drop_na() %>% # Not good practise!! (for the sake of demonstration only)
+  select(-1) # remove the first column as it's just the row indices
+```
+
+## Setup the prediction problem
+
+As we did yesterday, let's start by splitting our data into train-test subsets, and formatting the outcome variable (another binary classification task):
+
+```{r}
+# Break up our data into train and test
+train_index <- sample(1:nrow(adult), 0.666*nrow(adult), replace = FALSE)
+adult_train <- adult[train_index,]
+adult_test <- adult[setdiff(1:nrow(adult), train_index),]
+
+y_train <- ifelse(adult_train$class_labels == ">50K",1,0)
+y_test <- ifelse(adult_test$class_labels == ">50K",1,0)
+```
+
+## Feature engineering
+
+One major feature of neural network training is that the models are **very sensitive** to the shapes and scales of the input data. This sensitivity stems from the fact that, within the hidden layers of the network, it is treating all data "signals" as if they are of the same type. The substantive ranges of specific variables lose their meaning, in other words.
+
+If we do not do some form of pre-processing, we are making the job of the neural network harder: not only must it learn the relationships, but it must also learn how to take into account the different scale and spread of the input data itself. Therefore, we often perform some version of **feature engineering** to reduce the "stress" on the network, and improve performance.
+
+Fortunately, in R, this is nicely handled by the `recipes` package, which allows you to construct intuitive pipelines for manipulating your data into a neural network-friendly format:
+
+```{r}
+# Construct a "recipe"
+rec_obj <- recipe(class_labels ~ ., data = adult) %>%
+  step_dummy(all_nominal(), -all_outcomes()) %>% # One-hot encode columns
+  step_center(all_predictors(), -all_outcomes()) %>% # Centre all predictors on 0
+  step_scale(all_predictors(), -all_outcomes()) %>% # Scale all predictors with sd=1
+  prep(data = adult)
+```
+
+Notice that the recipe is agnostic to the data. We supply `data = adult` just to give it some indication of what to expect, but what we will actually do is `bake` this recipe on our train and test subsets, which are of the same type as the full data, but with fewer, and different, rows:
+
+```{r}
+x_train <- bake(rec_obj, new_data = adult_train) %>% select(-class_labels)
+x_test  <- bake(rec_obj, new_data = adult_test) %>% select(-class_labels)
+```
+
+## Construct a neural network
+
+Now we are ready to build our neural network! Again, we are going to use a pipeline approach. This is actually quite similar to how you might construct a neural network in a more "hands-on" neural network API like `pytorch`, which is an industry standard deep learning package in Python:
+
+```{r}
+model <- keras_model_sequential() %>% 
+  layer_dense(units = 32, activation = 'relu', input_shape = ncol(x_train)) %>% 
+  layer_dense(units = 16, activation = 'relu') %>%
+  layer_dense(units = 1, activation = 'sigmoid') %>% 
+  
+  # once defined, we then compile this network
+  compile(
+    optimizer = 'sgd', # Stochastic gradient descent -- what we hand-coded on Monday!
+    loss      = 'binary_crossentropy',
+    metrics   = c('accuracy') # Determines what is plotted while training occurs
+  )
+```
+
+## Training the network
+
+Another notable difference from days 1-3, is that the construction of our model is a separate step to the fitting itself. Recall from the lecture that the entire network already exists at construction, and the role of training is to *adjust* the weights and biases to better learn the data relationships.
+
+Again, this process is similar to other machine learning packages in Python like `sklearn` where you define a model as an object, then `fit` it to data, then `predict` new values post-training.
+
+In `keras`, we perform the training step using the `fit()` function:
+
+```{r}
+history <- fit(
+  object = model,
+  x = as.matrix(x_train), 
+  y = y_train, 
+  batch_size = 50,
+  epochs = 50,
+  validation_split = 0.30
+)
+```
+
+## Dropout
+
+We discussed in the lecture that we can further regularise our model by implementing dropout, a form of random noise that blocks signals passing through certain nodes. In keras, dropout is just a layer that we can add after a layer of conventional nodes:
+
+```{r}
+model_w_dropout <- keras_model_sequential() %>% 
+  layer_dense(units = 32, activation = 'relu', input_shape = ncol(x_train)) %>% 
+  layer_dropout(rate = 0.5) %>% 
+  layer_dense(units = 16, activation = 'relu') %>%
+  layer_dropout(rate = 0.5) %>% 
+  layer_dense(units = 1, activation = 'sigmoid') %>% 
+  
+  compile(
+    optimizer = 'sgd', # Stochastic gradient descent -- a variation of what we hand-coded on Monday!
+    loss      = 'binary_crossentropy',
+    metrics   = c('accuracy') # Determines what is plotted while training occurs
+  )
+
+history2 <- fit(
+  object = model_w_dropout,
+  x = as.matrix(x_train), 
+  y = y_train, 
+  batch_size = 50,
+  epochs = 50,
+  validation_split = 0.30
+)
+```
+
+## Exercises
+
+Today's exercise is to apply the pipeline shown above, but on a different dataset. Using the CCES data from yesterday, use a deep neural network to predict presidential vote choice:
+
+1. Construct a neural network fit to the CCES data. How does your first attempt compare to the accuracy of the random forest/BART models? Is that surprising?
+
+2. Try to improve your prediction accuracy by varying the network structure/hyperparameters
+
+  * BONUS: could you implement some form of cross-validation to justify your choice of hyperparameters?
+
+3.  Extend the network to a multi-class prediction problem? In other words, change the outcome variable so that you can predict "Trump","Clinton", or "Other". Hint: think carefully about the final layer of the neural network
