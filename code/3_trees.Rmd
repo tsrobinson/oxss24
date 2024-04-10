@@ -200,7 +200,7 @@ full_comp <- data.frame(y_true = Y_test,
 
   * For this task, it would be absolutely fine to do a grid search of one or two hyperparameters, with a small number of different values.
 
-3.Rad the following short article listed on the Moodle page:  
+3.Read the following short article listed on the Moodle page:  
 
 *Bisbee, James (2019) “BARP: Improving Mister P Using Bayesian Additive Regression Trees,” American Political Science Review. Cambridge University Press, 113(4), pp. 1060–1065. doi: 10.1017/S0003055419000480. Available online here: https://cup.org/3gzOt9o *
 
