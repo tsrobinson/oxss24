@@ -1,0 +1,186 @@
+# Ensemble Methods
+## Dr Thomas Robinson | Day 5 -- Oxford Spring School 2024
+
+This walkthrough uses the Cooperative Congressional Election Survey 2018 data we've used earlier in the week, and combines the various constituent models we've considered.
+
+The full data and codebook are available at https://doi.org/10.7910/DVN/ZSBZ7K
+
+## System setup
+
+```{r}
+# install.packages("nlmrt")
+
+library(glmnet)
+library(randomForest)
+library(nlmrt)
+```
+
+
+We'll now do som data munging very similar to earlier in the week:
+```{r}
+cces <- read.csv("../data/cces_formatted_oxss.csv")
+
+# As before, convert predictors to factors
+for (v in 1:ncol(cces)) {
+  if (is.character(cces[[v]])) {
+    cces[[v]] <- as.factor(cces[[v]])
+  }
+}
+
+# Recode outcome variable
+cces$votetrump <- ifelse(cces$vote2016 == "Donald Trump", 1, 0)
+
+# Split train and test data
+train_indices <- sample(1:nrow(cces), 0.666*nrow(cces))
+test_indices <-  setdiff(1:nrow(cces), train_indices)
+
+# restrict number of variables for demonstration
+train_vars <- c("birthyr", "gender", "sexuality", "trans", "educ", "votereg", "race")
+
+x_train <- cces[train_indices, train_vars]
+x_test <- cces[test_indices, train_vars]
+
+y_train <- cces$votetrump[train_indices]
+y_test <- cces$votetrump[test_indices]
+```
+
+
+## Estimate individual models
+
+Having completed the data munging, our next job is to train the individual classifiers we are going to use in our ensemble learner. 
+
+Note: we won't cross-validate all our hyperparameters today, although in a real application you should cross-validate your hyperparameters for *each* model. We will, however, briefly return to LASSO as this has a very convenient cross-validation function.
+
+
+### Logistic model
+
+Our first model comes from Day 1 (except here, we'll just rely on R's built-in `glm` function):
+
+```{r}
+# note: nothing exciting here -- just a linear combination of variables
+logit_model <- glm(paste0("votetrump ~ ",paste0(train_vars, collapse = " + ")),
+                   data = cbind(votetrump = y_train, x_train),
+                   family = binomial(link="logit"))
+```
+
+### LASSO
+
+`glmnet` is a little fussy when it comes to factors in R, so we're going to one-hot encode (or create dummy variables) for each of the categorical variables in our data:
+
+```{r}
+lasso_format <- function(X) {
+  
+  cat_vars <- c("gender","sexuality","trans","educ","votereg","race")
+  contr.list <- lapply(1:length(cat_vars), function (x) contr.sum)
+  names(contr.list) <- paste0("factor(",cat_vars,")")
+  fac_mod_mat <- model.matrix(as.formula(paste0("~", paste0(names(contr.list), collapse = " + "))),
+                              data=X[,cat_vars],contrasts.arg=contr.list)[,-1]
+  
+  mod_mat <- cbind(X$birthyr, fac_mod_mat)
+  
+  return(mod_mat)
+  
+}
+
+x_train_lasso <- lasso_format(x_train)
+```
+
+Next, we can use the `cv.glmnet` (read: cross-validated glmnet) to find the optimal lambda value for our data; and then use this value to train our final model:
+
+```{r}
+# find lambda
+cv_lambda <- cv.glmnet(x = x_train_lasso, y = y_train, alpha = 1)$lambda.min
+
+# final model
+lasso_mod <- glmnet(x = x_train_lasso, y = y_train, alpha = 1, lambda = cv_lambda)
+```
+
+
+### Random Forest
+
+Our random forest model is straightforward:
+
+```{r}
+rf_model <- randomForest(votetrump ~ ., 
+                         data = cbind(votetrump = as.factor(y_train), x_train))
+```
+
+## Train a stacking model
+
+To estimate our ensemble model, we first need to get the predictions from *each* of our constituent learners:
+
+```{r}
+
+# Get predictions on training data
+logit_yhat_train <- predict(logit_model, type = "response")
+
+lasso_yhat_train <- predict(lasso_mod, newx = x_train_lasso, type = "response")
+
+rf_yhat_train <- predict(rf_model, type = "prob")[,2]
+
+train_preds <- data.frame(Y = y_train,
+                          logit = as.numeric(logit_yhat_train),
+                          lasso = as.numeric(lasso_yhat_train),
+                          rf = as.numeric(rf_yhat_train))
+```
+
+Next, we will estimate the weights of our superlearner using nonlinear least squares estimator. Notice that we define the regression parameters explicitly, and constrain the random forest weight to be the residual of $1-b1-b2$:
+
+```{r}
+stack_model <- nlxb(Y ~ (b1 * logit + b2 * lasso + (1-b1-b2) * rf),
+                    data = train_preds,
+                    lower = numeric(2),
+                    start = list(b1 = 1/3, b2 = 1/3))
+
+```
+
+We can now look at what these coefficients look like:
+```{r}
+train_wgts <- c(stack_model$coefficients, 1 - sum(stack_model$coefficients))
+print(paste0("Learning model weights: ", train_wgts))
+```
+
+
+## Ensemble predictions
+
+Finally, we can combine the superlearner model weights along with the predictions from the constituent learners to generate a final prediction. 
+
+Notice that the final prediction can be achieved very easily using some basic linear algebra: since the predictions matrix is of shape $n \times 3$ and our stacked model coefficients are of shape $3 \times 1$, then the matrix multiplication of these objects is an $n \times 1$ vector (i.e. one prediction per observation).
+
+```{r}
+yhat_test_logit <- predict(logit_model, newdata = x_test, type = "response")
+
+yhat_test_lasso <-  predict(lasso_mod, newx = lasso_format(x_test), type = "response")
+
+yhat_test_rf <- predict(rf_model, newdata = x_test, type = "prob")[,2]
+
+stacked_pred <- cbind(as.numeric(yhat_test_logit),
+                      as.numeric(yhat_test_lasso),
+                      as.numeric(yhat_test_rf))
+
+yhat_test <- stacked_pred %*% train_wgts
+```
+
+## Accuracy of our ensemble model
+
+Finally, let's just take a look at the model accuracy:
+
+```{r}
+yhat_test_bin <- ifelse(yhat_test > 0.5, 1, 0)
+mean(yhat_test_bin == y_test)
+```
+
+## Exercise
+
+1. Create a function that would allow you to make new predictions given an input dataset X_test, logit, lasso, and RF models, and a corresponding vector of weights recovered from the stacked estimator.
+
+2. The above code is relatively verbose, and is not very extensible (i.e. we would have to change many steps if we added in another 1/2/3 constituent models to our ensemble). In fact, researchers have produced much more convenient packages that automate most of the pipeline we have implemented today.
+
+A particularly good R package for ensemble learning is `SuperLearner`, developed by Eric Polley, Erin LeDell, Chris Kennedy, Sam Lendle, and Mark van der Laan
+
+These authors have also put together an excellent guide to the package which is available here:
+https://cran.r-project.org/web/packages/SuperLearner/vignettes/Guide-to-SuperLearner.html
+
+Using the SuperLearner package and workflow in the above guide, can you repeat the above analysis? 
+
+NOTE: Given the use of cross-validation etc. don't expect to find identical results between our simplistic estimator and the SuperLearner equivalent.
